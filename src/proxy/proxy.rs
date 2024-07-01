@@ -1,11 +1,11 @@
-use http::{Request, Response, Uri};
+use http::{Request, Uri};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt,
     io::{Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
@@ -15,7 +15,7 @@ use uuid::{NoContext, Timestamp, Uuid};
 use super::connection::{ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool};
 use crate::{
     gateway::server::Server,
-    http_basic::{request::write_http_request, response::format_response},
+    http_basic::{request::write_http_request, response::stop_stream},
 };
 
 /// # Proxy
@@ -459,13 +459,7 @@ where
                     // Clone the proxy to be able to pass it to the thread
                     let proxy_safe = Arc::new(Mutex::new(self.clone()));
                     self.thread_pool.execute(move || {
-                        // Handle connection
-                        match super::connection::handle_connection(proxy_safe, connection) {
-                            Ok(_) => (),
-                            Err(e) => {
-                                error!("Error handling connection: {:?}", e);
-                            }
-                        }
+                        super::connection::handle_connection(proxy_safe, connection.clone());
                     })
                 }
                 Err(e) => {
@@ -494,49 +488,4 @@ pub struct ProxyForwardPath {
     pub path: Uri,
     pub exactly: bool,
     pub starts_with: bool,
-}
-
-pub fn not_found(conn: &mut MutexGuard<TcpStream>) -> Result<(), ProxyTcpConnectionError> {
-    let res: Response<String> = Response::builder()
-        .status(404)
-        .body("Not Found".to_string())
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    let formatted_response = format_response(res);
-    conn.write_all(&formatted_response)
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    stop_stream(conn)?;
-    Ok(())
-}
-
-pub fn unauthorized(conn: &mut MutexGuard<TcpStream>) -> Result<(), ProxyTcpConnectionError> {
-    let res: Response<String> = Response::builder()
-        .status(401)
-        .body("Unauthorized".to_string())
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    let formatted_response = format_response(res);
-    conn.write_all(&formatted_response)
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    stop_stream(conn)?;
-    Ok(())
-}
-
-pub fn internal_server_error(
-    conn: &mut MutexGuard<TcpStream>,
-) -> Result<(), ProxyTcpConnectionError> {
-    let res: Response<String> = Response::builder()
-        .status(500)
-        .body("Internal Server Error".to_string())
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    let formatted_response = format_response(res);
-    conn.write_all(&formatted_response)
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    stop_stream(conn)?;
-    Ok(())
-}
-
-pub fn stop_stream(stream: &mut TcpStream) -> Result<(), ProxyTcpConnectionError> {
-    stream
-        .shutdown(Shutdown::Both)
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
-    Ok(())
 }

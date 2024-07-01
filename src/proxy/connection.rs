@@ -6,8 +6,9 @@ use std::{collections::HashMap, net::TcpStream, sync::Arc};
 use uuid::Uuid;
 
 use crate::http_basic::request::parse_http_request;
+use crate::http_basic::response::{bad_request, err_response, internal_server_error, not_found, stop_stream};
 
-use super::proxy::{internal_server_error, stop_stream, Proxy, ProxyForward};
+use super::proxy::{Proxy, ProxyForward};
 
 #[derive(Debug)]
 pub enum ProxyTcpConnectionError {
@@ -133,7 +134,7 @@ impl ProxyTcpConnectionsPool {
 pub fn handle_connection<T>(
     proxy: Arc<Mutex<Proxy<T>>>,
     connection: Arc<ProxyTcpConnection>,
-) -> Result<(), ProxyTcpConnectionError>
+)
 where
     T: Serialize + for<'de> Deserialize<'de>,
 {
@@ -141,36 +142,53 @@ where
     let mut stream = match connection.stream.lock() {
         Ok(stream) => stream,
         Err(_) => {
-            return Err(ProxyTcpConnectionError::InternalServerError);
+            return;
         }
     };
 
     let max_buffer_size = match proxy.lock() {
         Ok(proxy) => proxy.max_buffer_size,
         Err(_) => {
-            return Err(ProxyTcpConnectionError::InternalServerError);
+            let _ = bad_request(&mut stream);
+            return
         }
     };
 
     // Read the buffer
     let mut buffer = vec![0; max_buffer_size];
-    let buffer_readed = stream
-        .read(&mut buffer)
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+    let buffer_readed = match stream
+        .read(&mut buffer) {
+        Ok(buffer_readed) => buffer_readed,
+        Err(_) => {
+            let _ = internal_server_error(&mut stream);
+            return
+        }
+    };
 
     // Check if the buffer is empty
     if buffer_readed == 0 {
-        error!("Failed to read from stream 0 buffer size");
-        return Err(ProxyTcpConnectionError::BadRequest);
+        let _ = bad_request(&mut stream);
+        return;
     }
 
     // Parse the http request into http::Request<Vec<u8>>
-    let mut req = parse_http_request(&buffer).map_err(|e| e)?;
+    let mut req = match parse_http_request(&buffer) {
+        Ok(req) => req,
+        Err(e) => {
+            let _ = err_response(&mut stream, e);
+            return;
+        }
+    };
 
     // Get the proxy instance
-    let proxy = proxy
-        .lock()
-        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+    let proxy = match proxy
+        .lock() {
+        Ok(proxy) => proxy,
+        Err(_) => {
+            let _ = internal_server_error(&mut stream);
+            return;
+        }
+    };
 
     let selected_forwarder: Option<&ProxyForward>;
     // Check if request hit path matching
@@ -180,8 +198,8 @@ where
     } else if let Some(forwarder) = proxy.get_forwarder_for_request_by_all_matched_headers(&req) {
         selected_forwarder = Some(forwarder);
     } else {
-        // Request does not match any forwarder
-        return Err(ProxyTcpConnectionError::NotFound);
+        let _ = not_found(&mut stream);
+        return;
     }
 
     match selected_forwarder {
@@ -195,8 +213,9 @@ where
                         Ok(mut server) => {
                             server.decrement_active_connections();
                         }
-                        Err(e) => {
-                            error!("Failed to lock the server: {}", e);
+                        Err(_) => {
+                            let _ = internal_server_error(&mut stream);
+                            return;
                         }
                     }
                 }
@@ -206,26 +225,34 @@ where
                             Ok(mut server) => {
                                 server.decrement_active_connections();
                             }
-                            Err(e) => {
-                                error!("Failed to lock the server: {}", e);
+                            Err(_) => {
+                                let _ = internal_server_error(&mut stream);
+                                return;
                             }
                         },
                         None => {
-                            error!("Failed to forward request");
+                            let _ = internal_server_error(&mut stream);
+                            return;
                         }
                     }
 
-                    let _ = internal_server_error(&mut stream);
-
-                    return Err(err);
+                    let _ = err_response(&mut stream, err);
+                    return;
                 }
             }
         }
         None => {
-            return Err(ProxyTcpConnectionError::NotFound);
+            let _ = not_found(&mut stream);
+            return;
         }
     }
 
     // Stop the stream
-    stop_stream(&mut stream).map_err(|_| ProxyTcpConnectionError::InternalServerError)
+    match stop_stream(&mut stream) {
+        Ok(_) => {}
+        Err(_) => {
+            let _ = internal_server_error(&mut stream);
+            return;
+        }
+    }
 }

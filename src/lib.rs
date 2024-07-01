@@ -24,7 +24,7 @@ mod tests {
             address,
             max_connections: 100,
             threads: 1,
-            max_buffer_size: 1024,
+            max_buffer_size: 1,
         });
 
         my_proxy.set_load_balancer(|preselected_servers| {
