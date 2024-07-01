@@ -76,6 +76,7 @@ pub struct ProxyConfig {
     pub address: SocketAddr,
     pub max_connections: usize,
     pub threads: usize,
+    pub max_buffer_size: usize,
 }
 
 impl<T> Proxy<T>
@@ -100,6 +101,7 @@ where
             servers: HashMap::new(),
             forward: Vec::new(),
             load_balancer: None,
+            max_buffer_size: config.max_buffer_size,
         }
     }
 
