@@ -12,10 +12,11 @@ use std::{
 use threadpool::ThreadPool;
 use uuid::{NoContext, Timestamp, Uuid};
 
-use super::connection::{
-    ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool,
+use super::connection::{ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool};
+use crate::{
+    gateway::server::Server,
+    http_basic::{request::write_http_request, response::format_response},
 };
-use crate::{gateway::server::Server, http_basic::{request::write_http_request, response::format_response}};
 
 /// # Proxy
 ///
@@ -38,6 +39,7 @@ pub struct Proxy<T> {
     pub servers: HashMap<T, Arc<Mutex<Server>>>,
     pub forward: Vec<ProxyForward>,
     pub load_balancer: Option<CloneableFn>,
+    pub max_buffer_size: usize,
 }
 
 #[derive(Clone)]
@@ -91,7 +93,9 @@ where
         Self {
             address: config.address,
             listener: None,
-            connections_pool: Arc::new(Mutex::new(ProxyTcpConnectionsPool::new(config.max_connections))),
+            connections_pool: Arc::new(Mutex::new(ProxyTcpConnectionsPool::new(
+                config.max_connections,
+            ))),
             thread_pool: ThreadPool::new(config.threads),
             servers: HashMap::new(),
             forward: Vec::new(),
@@ -245,7 +249,7 @@ where
         forwarder: &ProxyForward,
         conn: &mut MutexGuard<TcpStream>,
         req: &mut Request<Vec<u8>>,
-    ) -> Result<(), ProxyTcpConnectionError> {
+    ) -> Result<Arc<Mutex<Server>>, (ProxyTcpConnectionError, Option<Arc<Mutex<Server>>>)> {
         // we already have retrieve the matching server/s, but now, we have to select one, based on the load balancer, if any, or just the first one
         let selected_server_mutex = match self.load_balancer {
             // use the configured load balancer
@@ -256,21 +260,39 @@ where
             // if no load balancer is set, just use the first one
             None => match forwarder.to.first().as_ref() {
                 Some(&server) => server.clone(),
-                None => return Err(ProxyTcpConnectionError::InternalServerError),
+                None => return Err((ProxyTcpConnectionError::InternalServerError, None)),
             },
         };
 
-        let selected_server = match selected_server_mutex.lock() {
+        let mut selected_server = match selected_server_mutex.lock() {
             Ok(server) => server,
             Err(e) => {
                 error!("Error getting server: {:?}", e);
-                return Err(ProxyTcpConnectionError::InternalServerError);
+                return Err((ProxyTcpConnectionError::InternalServerError, None));
             }
         };
 
+        let accepted_scheme = &selected_server.accepted_schemes.iter().any(|scheme| {
+            scheme.as_str() == req.uri().scheme_str().unwrap_or_default()
+        });
+
+        if !accepted_scheme {
+            return Err((ProxyTcpConnectionError::Unauthorized, Some(selected_server_mutex.clone())));
+        }
+
         // Connect to Server address
-        let mut stream = TcpStream::connect(selected_server.address)
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+        let mut stream = match TcpStream::connect(selected_server.address.clone()) {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("Error connecting to server: {}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    None,
+                ));
+            }
+        };
+
+        selected_server.increment_active_connections();
 
         // Set timeouts
         let _ = stream
@@ -294,27 +316,66 @@ where
 
         // Write request again to buffer
         let mut buffer = Vec::new();
-        let _ =
-            write_http_request(&mut buffer, &req).map_err(|_| ProxyTcpConnectionError::BadRequest);
+        match write_http_request(&mut buffer, &req) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error writing http request: {:?}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server_mutex.clone()),
+                ));
+            }
+        };
 
-        stream
-            .write_all(&buffer)
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+        match stream.write_all(&buffer) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error writing to stream: {}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server_mutex.clone()),
+                ));
+            }
+        };
 
         // Read response from server
         let mut server_response = Vec::new();
-        stream
-            .read_to_end(&mut server_response)
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+        match stream.read_to_end(&mut server_response) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error reading from stream: {}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server_mutex.clone()),
+                ));
+            }
+        };
 
         // Write response to client
-        conn.write_all(&server_response)
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+        match conn.write_all(&server_response) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error writing to client: {}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server_mutex.clone()),
+                ));
+            }
+        };
 
         // Stop the stream
-        stop_stream(&mut stream).map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+        match stop_stream(&mut stream) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error stopping stream: {:?}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server_mutex.clone()),
+                ));
+            }
+        };
 
-        Ok(())
+        Ok(selected_server_mutex.clone())
     }
 
     /// # Listen
@@ -386,7 +447,7 @@ where
                                     continue;
                                 }
                             }
-                        },
+                        }
                         Err(e) => {
                             error!("Error adding connection to pool: {:?}", e);
                             continue;

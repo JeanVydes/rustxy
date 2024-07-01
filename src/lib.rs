@@ -1,12 +1,15 @@
-pub mod proxy;
 pub mod gateway;
 pub mod http_basic;
+pub mod proxy;
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, sync::{Arc, Mutex}};
+    use std::{
+        net::SocketAddr,
+        sync::{Arc, Mutex},
+    };
 
-    use gateway::server::{ServerConfig, ServerEndpoint};
+    use gateway::server::{Server, ServerConfig, ServerEndpoint};
     use http::{uri::Scheme, Uri};
     use log::error;
     use proxy::proxy::{ProxyConfig, ProxyForward, ProxyForwardPath};
@@ -24,7 +27,30 @@ mod tests {
         });
 
         my_proxy.set_load_balancer(|preselected_servers| {
-            return preselected_servers[0].clone();
+            let mut least_connections_server: Option<Arc<Mutex<Server>>> = None;
+            let mut least_connections = usize::max_value();
+
+            for server_mutex in preselected_servers.clone() {
+                match server_mutex.lock() {
+                    Ok(server) => {
+                        let conn = server.active_connections;
+                        if conn < least_connections {
+                            least_connections = conn;
+                            least_connections_server = Some(server_mutex.clone());
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to lock the server: {}", e);
+                    }
+                }
+            }
+
+            if let Some(server) = &least_connections_server {
+                println!("Selected server with least connections: {:?}", server);
+                return server.clone();
+            }
+
+            preselected_servers[0].clone()
         });
 
         // Create the address for our backend server
