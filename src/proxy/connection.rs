@@ -1,13 +1,23 @@
-use http::{Method, Request, Response, StatusCode};
+use http::{Method, Request, Response};
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use std::str::from_utf8;
 use std::sync::Mutex;
 use std::{collections::HashMap, net::TcpStream, sync::Arc};
 use uuid::Uuid;
 
-use super::proxy::Proxy;
+use super::proxy::{stop_stream, Proxy};
+
+#[derive(Debug)]
+pub enum ProxyTcpConnectionError {
+    Error(String),
+    InternalServerError,
+    NotFound,
+    Unauthorized,
+    Forbidden,
+    BadRequest,
+    MethodNotAllowed,
+}
 
 pub type TcpConnectionID = Uuid;
 
@@ -65,83 +75,82 @@ impl ProxyTcpConnectionsPool {
     }
 }
 
-pub fn handle_connection<T>(proxy: Arc<Mutex<Proxy<T>>>, connection: ProxyTcpConnection)
-where T: Serialize + for<'de> Deserialize<'de>
+pub fn handle_connection<T>(
+    proxy: Arc<Mutex<Proxy<T>>>,
+    connection: ProxyTcpConnection,
+) -> Result<(), ProxyTcpConnectionError>
+where
+    T: Serialize + for<'de> Deserialize<'de>,
 {
     let mut stream = match connection.stream.lock() {
         Ok(stream) => stream,
         Err(_) => {
-            return;
+            return Err(ProxyTcpConnectionError::InternalServerError);
         }
     };
 
     let mut buffer = [0; 1024];
-    match stream.read(&mut buffer) {
-        Ok(0) => return,
-        Ok(_) => match parse_http_request(&buffer) {
-            Ok(req) => {
-                match proxy.lock() {
-                    Ok(proxy) => {
-                        if let Some(server) = proxy.get_server_for_request_by_path(&req) {
-                            proxy.forward_conn(&server, &mut stream, &buffer);
-                        } else if let Some(server) =
-                            proxy.get_server_for_request_by_all_matched_headers(&req)
-                        {
-                            proxy.forward_conn(&server, &mut stream, &buffer);
-                        } else {
-                            error!("No server found for request");
-                        }
-                    }
-                    Err(er) => {
-                        error!("Failed to lock proxy: {:?}", er);
-                    }
-                }
-            }
-            Err(err) => {
-                error!("Failed to parse request: {:?}", err);
-            }
-        },
-        Err(_) => {
-            error!("Failed to read from stream");
-        }
+    let buffer_readed = stream
+        .read(&mut buffer)
+        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+    if buffer_readed == 0 {
+        error!("Failed to read from stream 0 buffer size");
+        return Err(ProxyTcpConnectionError::BadRequest);
     }
 
-    if let Err(e) = stream.shutdown(std::net::Shutdown::Both) {
-        error!("Failed to shut down the stream: {:?}", e);
+    let mut req = parse_http_request(&buffer).map_err(|e| e)?;
+
+    let proxy = proxy
+        .lock()
+        .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+
+    if let Some(forwarder) = proxy.get_forwarder_for_request_by_path(&req) {
+        proxy.forward_conn(&forwarder, &mut stream, &mut req, &mut buffer).map_err(|e| e)?;
+    } else if let Some(forwarder) = proxy.get_forwarder_for_request_by_all_matched_headers(&req) {
+        proxy.forward_conn(&forwarder, &mut stream, &mut req, &mut buffer).map_err(|e| e)?;
+    } else {
+        return Err(ProxyTcpConnectionError::NotFound);
     }
+
+    stop_stream(&mut stream).map_err(|_| ProxyTcpConnectionError::InternalServerError)
 }
 
-fn parse_http_request(buffer: &[u8]) -> Result<Request<&str>, String> {
+pub fn parse_http_request(buffer: &[u8]) -> Result<Request<Vec<u8>>, ProxyTcpConnectionError> {
     let mut headers = [httparse::EMPTY_HEADER; 16];
     let mut req = httparse::Request::new(&mut headers);
 
     let status = match req.parse(buffer) {
         Ok(status) => status,
         Err(e) => {
-            return Err(e.to_string());
+            error!("Failed to parse request: {}", e);
+            return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
-    
+
     if status.is_partial() {
-        return Err("Request is partial".to_string());
+        error!("Failed to parse request");
+        return Err(ProxyTcpConnectionError::BadRequest);
     }
 
     let method: Method = match req.method {
         Some(t) => match t.parse() {
             Ok(method) => method,
             Err(e) => {
-                return Err("Invalid Method".to_string());
+                error!("Failed to parse method: {}", e);
+                return Err(ProxyTcpConnectionError::MethodNotAllowed);
             }
         },
         None => {
-            return Err("Method not found".to_string());
+            error!("Failed to parse method");
+            return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
 
     let path = match req.path {
         Some(path) => path,
         None => {
-            return Err("Path not found".to_string());
+            error!("Failed to parse path");
+            return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
 
@@ -154,7 +163,8 @@ fn parse_http_request(buffer: &[u8]) -> Result<Request<&str>, String> {
     let uri: String = match path.parse() {
         Ok(uri) => uri,
         Err(e) => {
-            return Err(e.to_string());
+            error!("Failed to parse uri: {}", e);
+            return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
 
@@ -167,26 +177,42 @@ fn parse_http_request(buffer: &[u8]) -> Result<Request<&str>, String> {
     let header_len = match status {
         httparse::Status::Complete(len) => len,
         _ => {
-            return Err("Failed to parse request".to_string());
+            error!("Failed to parse headers");
+            return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
 
-    let body = &buffer[header_len..];
-
-    let body_str = match from_utf8(body) {
-        Ok(body_str) => body_str,
-        Err(e) => {
-            return Err(e.to_string());
-        }
-    };
-
-    match builder.body(body_str) {
+    match builder.body(buffer[header_len..].to_vec()) {
         Ok(request) => Ok(request),
-        Err(e) => Err(e.to_string()),
+        Err(_) => Err(ProxyTcpConnectionError::BadRequest),
     }
 }
 
-fn format_response(response: Response<String>) -> Vec<u8> {
+pub fn write_http_request<W: Write>(writer: &mut W, req: &Request<Vec<u8>>) -> std::io::Result<()> {
+    // Write the request line
+    write!(
+        writer,
+        "{} {} {:?}\r\n",
+        req.method(),
+        req.uri(),
+        req.version()
+    )?;
+
+    // Write the headers
+    for (name, value) in req.headers() {
+        write!(writer, "{}: {}\r\n", name, value.to_str().unwrap())?;
+    }
+
+    // End headers section
+    write!(writer, "\r\n")?;
+
+    // Write the body
+    writer.write_all(req.body())?;
+
+    Ok(())
+}
+
+pub fn format_response(response: Response<String>) -> Vec<u8> {
     let status_line = format!(
         "HTTP/1.1 {} {}\r\n",
         response.status().as_u16(),

@@ -27,27 +27,13 @@ mod tests {
             endpoints: Default::default(),
         });
 
-        let uri = Uri::from_static("/api/v1/test");
+        let uri = Uri::from_static("/");
         my_api_server.add_endpoint(ServerEndpoint {
             scheme: gateway::server::Schemes::Http,
             uri,
             method: http::Method::GET,
             headers: vec![],
         });
-
-        my_proxy.add_forward(ProxyForward {
-            match_headers: None,
-            match_query: None,
-            match_method: None,
-            match_path: Some(vec![ProxyForwardPath {
-                exactly: true,
-                starts_with: false,
-                path: Uri::from_static("/something"),
-            }]),
-
-            to: my_api_server.clone(),
-        });
-
         my_proxy.add_forward(ProxyForward {
             match_headers: None,
             match_query: None,
@@ -55,8 +41,10 @@ mod tests {
             match_path: Some(vec![ProxyForwardPath {
                 exactly: false,
                 starts_with: true,
-                path: Uri::from_static("/api/v1"),
+                path: Uri::from_static("/"),
             }]),
+
+            rewrite_to: None,
 
             to: my_api_server.clone(),
         });
