@@ -1,28 +1,50 @@
 use std::{collections::HashMap, net::SocketAddr};
 
-use http::{Method, Uri};
+use http::{uri::Scheme, Method, Uri};
 
-#[derive(Debug, Clone, Copy)]
-pub enum Schemes {
-    Http,
-    Https,
-    Websocket,
-}
 
+/// # Server
+/// 
+/// The server struct
+/// 
+/// # Fields
+/// 
+/// * `address` - The address
+/// * `accepted_schemes` - The accepted schemes
+/// * `endpoints` - The endpoints
 #[derive(Debug, Clone)]
 pub struct Server {
     pub address: SocketAddr,
-    pub accepted_schemes: Vec<Schemes>,
+    pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>
 }
 
+/// # Server Config
+/// 
+/// The server config struct
+/// 
+/// # Fields
+/// 
+/// * `address` - The address
+/// * `accepted_schemes` - The accepted schemes
+/// * `endpoints` - The endpoints
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub address: SocketAddr,
-    pub accepted_schemes: Vec<Schemes>,
+    pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>
 }
 
+/// # Server
+/// 
+/// The implementation of the server
+/// 
+/// # Methods
+/// 
+/// * `new` - The server constructor
+/// * `get_endpoint` - Get an endpoint
+/// * `add_endpoint` - Add an endpoint
+/// * `remove_endpoint` - Remove an endpoint
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
         Self {
@@ -45,20 +67,47 @@ impl Server {
     }
 }
 
+/// # Server Endpoint
+/// 
+/// The server endpoint struct
+/// 
+/// # Fields
+/// 
+/// * `scheme` - The scheme
+/// * `uri` - The uri
+/// * `method` - The method
+/// * `headers` - The headers
 #[derive(Debug, Clone)]
 pub struct ServerEndpoint {
-    pub scheme: Schemes,
+    pub scheme: Scheme,
     pub uri: Uri,
     pub method: Method,
     pub headers: Vec<ServerEndpointHeader>,
 }
 
+/// # Server Endpoint Header Type
+/// 
+/// The server endpoint header type enum
+/// 
+/// # Fields
+/// 
+/// * `In` - The incoming header
+/// * `Out` - The outgoing header
 #[derive(Debug, Clone, Copy)]
 pub enum ServerEndpointHeaderType {
     In,
     Out,
 }
 
+/// # Server Endpoint Header
+/// 
+/// The server endpoint header struct
+/// 
+/// # Fields
+/// 
+/// * `r#type` - The header type
+/// * `key` - The header key
+/// * `value` - The header value
 #[derive(Debug, Clone)]
 pub struct ServerEndpointHeader {
     pub r#type: ServerEndpointHeaderType,
@@ -66,7 +115,24 @@ pub struct ServerEndpointHeader {
     pub value: String,
 }
 
+
+/// # Server Endpoint
+/// 
+/// The implementation of the server endpoint
+/// 
+/// # Methods
+/// 
+/// * `set_in_header` - Set an incoming header
+/// * `set_out_header` - Set an outgoing header
 impl ServerEndpoint {
+    /// # Set In Header
+    /// 
+    /// Set an incoming header, that will hit the real server
+    /// 
+    /// # Arguments
+    /// 
+    /// * `key` - The header key
+    /// * `value` - The header value
     pub fn set_in_header(&mut self, key: String, value: String) {
         self.headers.push(ServerEndpointHeader {
             r#type: ServerEndpointHeaderType::In,
@@ -75,6 +141,14 @@ impl ServerEndpoint {
         });
     }
 
+    /// # Set Out Header
+    /// 
+    /// Set an outgoing header, that will be sent to the client
+    /// 
+    /// # Arguments
+    /// 
+    /// * `key` - The header key
+    /// * `value` - The header value
     pub fn set_out_header(&mut self, key: String, value: String) {
         self.headers.push(ServerEndpointHeader {
             r#type: ServerEndpointHeaderType::Out,
