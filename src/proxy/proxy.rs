@@ -1,8 +1,9 @@
 use http::{Request, Response, Uri};
-use log::error;
+use log::{error, info};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    fmt,
     io::{Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     sync::{Arc, Mutex, MutexGuard},
@@ -12,17 +13,16 @@ use threadpool::ThreadPool;
 use uuid::{NoContext, Timestamp, Uuid};
 
 use super::connection::{
-    format_response, ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool,
+    ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool,
 };
-use crate::{gateway::server::Server, proxy::connection::write_http_request};
-
+use crate::{gateway::server::Server, http_basic::{request::write_http_request, response::format_response}};
 
 /// # Proxy
-/// 
+///
 /// This struct represents a Proxy.
-/// 
+///
 /// ## Fields
-/// 
+///
 /// * `address` - A SocketAddr.
 /// * `listener` - A TcpListener.
 /// * `connections_pool` - A ProxyTcpConnectionsPool.
@@ -33,18 +33,39 @@ use crate::{gateway::server::Server, proxy::connection::write_http_request};
 pub struct Proxy<T> {
     pub address: SocketAddr,
     pub listener: Option<Arc<TcpListener>>,
-    pub connections_pool: ProxyTcpConnectionsPool,
+    pub connections_pool: Arc<Mutex<ProxyTcpConnectionsPool>>,
     pub thread_pool: ThreadPool,
-    pub servers: HashMap<T, Server>,
+    pub servers: HashMap<T, Arc<Mutex<Server>>>,
     pub forward: Vec<ProxyForward>,
+    pub load_balancer: Option<CloneableFn>,
+}
+
+#[derive(Clone)]
+pub struct CloneableFn(
+    Arc<dyn Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static>,
+);
+
+impl CloneableFn {
+    fn new<F>(f: F) -> Self
+    where
+        F: Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+    {
+        CloneableFn(Arc::new(f))
+    }
+}
+
+impl fmt::Debug for CloneableFn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Closure")
+    }
 }
 
 /// # Proxy Config
-/// 
+///
 /// This struct contains the configuration for the Proxy.
-/// 
+///
 /// ## Fields
-/// 
+///
 /// * `address` - A SocketAddr.
 /// * `max_connections` - Max parallel connections.
 /// * `threads` - Threads to use.
@@ -60,30 +81,31 @@ where
     T: Serialize + for<'de> Deserialize<'de>,
 {
     /// # New Proxy
-    /// 
+    ///
     /// This function will create a new Proxy.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `config` - A ProxyConfig.
     pub fn new(config: ProxyConfig) -> Self {
         Self {
             address: config.address,
             listener: None,
-            connections_pool: ProxyTcpConnectionsPool::new(config.max_connections),
+            connections_pool: Arc::new(Mutex::new(ProxyTcpConnectionsPool::new(config.max_connections))),
             thread_pool: ThreadPool::new(config.threads),
             servers: HashMap::new(),
             forward: Vec::new(),
+            load_balancer: None,
         }
     }
 
     /// # Get Forwarder for Request by Method
-    /// 
+    ///
     /// This function will return the forwarder that matches the method of the request.
     /// The function will iterate over all forwarders and check if the method matches the request method.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `request` - A reference to a http::Request<Vec<u8>>.
     pub fn get_forwarder_for_request_by_path(
         &self,
@@ -109,14 +131,14 @@ where
     }
 
     /// # Get Forwarder for Request by All Matched Headers
-    /// 
+    ///
     /// This function will return the forwarder that matches all headers of the request.
     /// The function will iterate over all forwarders and check if all headers are present in the request.
     /// If all headers are present, it will return the forwarder.
     /// If not all headers are present, it will continue to the next forwarder.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `request` - A reference to a http::Request<Vec<u8>>.
     pub fn get_forwarder_for_request_by_all_matched_headers(
         &self,
@@ -138,13 +160,13 @@ where
     }
 
     /// # Get Server
-    /// 
+    ///
     /// This function will return a reference to a Server by key.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `key` - A key of type T.
-    pub fn get_server(&self, key: &T) -> Option<&Server>
+    pub fn get_server(&self, key: &T) -> Option<&Arc<Mutex<Server>>>
     where
         T: std::cmp::Eq + std::hash::Hash,
     {
@@ -152,14 +174,14 @@ where
     }
 
     /// # Add Server
-    /// 
+    ///
     /// This function will add a Server to the Proxy.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `key` - A key of type T.
     /// * `server` - A Server.
-    pub fn add_server(&mut self, key: T, server: Server)
+    pub fn add_server(&mut self, key: T, server: Arc<Mutex<Server>>)
     where
         T: std::cmp::Eq + std::hash::Hash,
     {
@@ -169,9 +191,9 @@ where
     /// # Remove Server
     ///     
     /// This function will remove a Server from the Proxy by key.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `key` - A key of type T.
     pub fn remove_server(&mut self, key: T)
     where
@@ -181,33 +203,40 @@ where
     }
 
     /// # Get Forwards
-    /// 
+    ///
     /// ¿What is a forward?
-    /// 
+    ///
     /// A forward is a ProxyForward struct that contains the information to forward a request to a Server.
-    /// 
+    ///
     /// This function will return a reference to the forward Vec.
     pub fn get_forwards(&self) -> &Vec<ProxyForward> {
         &self.forward
     }
 
     /// # Add Forward
-    /// 
+    ///
     /// This function will add a ProxyForward to the forward Vec.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `forward` - A ProxyForward.
     pub fn add_forward(&mut self, forward: ProxyForward) {
         self.forward.push(forward.clone());
     }
 
+    pub fn set_load_balancer<K>(&mut self, load_balancer: K)
+    where
+        K: Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+    {
+        self.load_balancer = Some(CloneableFn::new(load_balancer));
+    }
+
     /// # Forward Connection
-    /// 
+    ///
     /// This function will forward a connection to a Server.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `forwarder` - A reference to a ProxyForward.
     /// * `conn` - A mutable reference to a MutexGuard<TcpStream>.
     /// * `req` - A mutable reference to a Request<Vec<u8>>.
@@ -217,9 +246,30 @@ where
         conn: &mut MutexGuard<TcpStream>,
         req: &mut Request<Vec<u8>>,
     ) -> Result<(), ProxyTcpConnectionError> {
-        println!("Forwarding request to: {}", forwarder.to.address);
+        // we already have retrieve the matching server/s, but now, we have to select one, based on the load balancer, if any, or just the first one
+        let selected_server_mutex = match self.load_balancer {
+            // use the configured load balancer
+            Some(ref lb) => {
+                let servers = forwarder.to.clone();
+                lb.0(servers)
+            }
+            // if no load balancer is set, just use the first one
+            None => match forwarder.to.first().as_ref() {
+                Some(&server) => server.clone(),
+                None => return Err(ProxyTcpConnectionError::InternalServerError),
+            },
+        };
+
+        let selected_server = match selected_server_mutex.lock() {
+            Ok(server) => server,
+            Err(e) => {
+                error!("Error getting server: {:?}", e);
+                return Err(ProxyTcpConnectionError::InternalServerError);
+            }
+        };
+
         // Connect to Server address
-        let mut stream = TcpStream::connect(&forwarder.to.address)
+        let mut stream = TcpStream::connect(selected_server.address)
             .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
 
         // Set timeouts
@@ -268,20 +318,20 @@ where
     }
 
     /// # Listen
-    /// 
+    ///
     /// This function will listen for incoming connections.
-    /// 
+    ///
     /// The function will bind to the address and listen for incoming connections.
     pub fn listen(&mut self)
     where
-        Proxy<T>: Clone,
+        Proxy<T>: Clone + Send + 'static,
         T: std::cmp::Eq + std::hash::Hash + Clone + Send + 'static,
     {
         // Bind to address
         self.listener = match TcpListener::bind(&self.address) {
             Ok(listener) => Some(listener.into()),
             Err(e) => {
-                eprintln!("Error binding to address: {}", e);
+                error!("Error binding to address: {}", e);
                 return;
             }
         };
@@ -290,12 +340,12 @@ where
         let listener = match self.listener.as_ref() {
             Some(listener) => listener.clone(),
             None => {
-                eprintln!("Error getting listener");
+                error!("Error getting listener");
                 return;
             }
         };
 
-        println!("Listening on: {}", self.address);
+        info!("Listening on: {}", self.address);
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
@@ -303,7 +353,7 @@ where
                     let peer_addr = match stream.peer_addr() {
                         Ok(addr) => addr.to_string(),
                         Err(e) => {
-                            eprintln!("Error getting peer address: {}", e);
+                            error!("Error getting peer address: {}", e);
                             continue;
                         }
                     };
@@ -319,25 +369,33 @@ where
                     );
 
                     // Create connection
-                    let connection = ProxyTcpConnection {
+                    let connection = Arc::new(ProxyTcpConnection {
                         id: Uuid::new_v7(ts),
                         stream: safe_stream,
                         peer_addr,
-                    };
+                    });
 
                     // Add connection to pool
-                    match self.connections_pool.add_connection(connection.clone()) {
-                        Ok(_) => (),
+                    // First lock the pool, then add the connection
+                    match self.connections_pool.lock() {
+                        Ok(mut connection_pool) => {
+                            match connection_pool.add_connection(connection.clone()) {
+                                Ok(_) => (),
+                                Err(e) => {
+                                    error!("Error adding connection to pool: {:?}", e);
+                                    continue;
+                                }
+                            }
+                        },
                         Err(e) => {
-                            eprintln!("Error adding connection to pool: {}", e);
+                            error!("Error adding connection to pool: {:?}", e);
                             continue;
                         }
                     }
 
-                    println!("Accepted connection from: {}", connection.peer_addr);
                     // Clone the proxy to be able to pass it to the thread
                     let proxy_safe = Arc::new(Mutex::new(self.clone()));
-                    self.thread_pool.execute(|| {
+                    self.thread_pool.execute(move || {
                         // Handle connection
                         match super::connection::handle_connection(proxy_safe, connection) {
                             Ok(_) => (),
@@ -348,7 +406,7 @@ where
                     })
                 }
                 Err(e) => {
-                    eprintln!("Error accepting connection: {}", e);
+                    error!("Error accepting connection: {}", e);
                     continue;
                 }
             }
@@ -365,7 +423,7 @@ pub struct ProxyForward {
 
     pub rewrite_to: Option<Uri>,
 
-    pub to: Server,
+    pub to: Vec<Arc<Mutex<Server>>>,
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, net::SocketAddr, sync::{Arc, Mutex}};
 
 use http::{uri::Scheme, Method, Uri};
+use uuid::Uuid;
+
+use crate::proxy::connection::ProxyTcpConnection;
 
 
 /// # Server
@@ -16,7 +19,8 @@ use http::{uri::Scheme, Method, Uri};
 pub struct Server {
     pub address: SocketAddr,
     pub accepted_schemes: Vec<Scheme>,
-    pub endpoints: HashMap<Uri, ServerEndpoint>
+    pub endpoints: HashMap<Uri, ServerEndpoint>,
+    pub connections: HashMap<Uuid, Arc<Mutex<ProxyTcpConnection>>>,
 }
 
 /// # Server Config
@@ -51,6 +55,7 @@ impl Server {
             address: config.address,
             accepted_schemes: config.accepted_schemes,
             endpoints: config.endpoints,
+            connections: Default::default(),
         }
     }
 
@@ -64,6 +69,14 @@ impl Server {
 
     pub fn remove_endpoint(&mut self, uri: Uri) {
         self.endpoints.remove(&uri);
+    }
+
+    pub fn add_connection(&mut self, connection_id: Uuid, connection: Arc<Mutex<ProxyTcpConnection>>) {
+        self.connections.insert(connection_id.to_owned(), connection.to_owned());
+    }
+
+    pub fn remove_connection(&mut self, id: Uuid) {
+        self.connections.remove(&id);
     }
 }
 
