@@ -1,5 +1,4 @@
 use log::error;
-use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::sync::Mutex;
 use std::{collections::HashMap, net::TcpStream, sync::Arc};
@@ -131,13 +130,10 @@ impl ProxyTcpConnectionsPool {
 ///
 /// * `proxy` - The proxy instance
 /// * `connection` - The connection to handle
-pub fn handle_connection<T>(
-    proxy: Arc<Mutex<Proxy<T>>>,
+pub fn handle_connection(
+    proxy: Arc<Mutex<Proxy>>,
     connection: Arc<ProxyTcpConnection>,
-)
-where
-    T: Serialize + for<'de> Deserialize<'de>,
-{
+) {
     // Get the stream
     let mut stream = match connection.stream.lock() {
         Ok(stream) => stream,
@@ -208,28 +204,10 @@ where
                 .forward_conn(proxy.shared_state.clone(), forwarder, &mut stream, &mut req)
                 .map_err(|e| e)
             {
-                Ok(server) => {
-                    match server.lock() {
-                        Ok(mut server) => {
-                            server.decrement_active_connections();
-                        }
-                        Err(_) => {
-                            let _ = internal_server_error(&mut stream);
-                            return;
-                        }
-                    }
-                }
+                Ok(_) => (),
                 Err((err, server)) => {
                     match server {
-                        Some(server) => match server.lock() {
-                            Ok(mut server) => {
-                                server.decrement_active_connections();
-                            }
-                            Err(_) => {
-                                let _ = internal_server_error(&mut stream);
-                                return;
-                            }
-                        },
+                        Some(_) => (),
                         None => {
                             let _ = internal_server_error(&mut stream);
                             return;

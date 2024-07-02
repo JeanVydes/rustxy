@@ -1,6 +1,5 @@
 use http::{Request, Uri};
 use log::{error, info};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt,
@@ -31,12 +30,12 @@ use crate::{
 /// * `servers` - A HashMap of type T and Server.
 /// * `forward` - A Vec of ProxyForward.
 #[derive(Debug, Clone)]
-pub struct Proxy<T> {
+pub struct Proxy {
     pub address: SocketAddr,
     pub listener: Option<Arc<TcpListener>>,
     pub connections_pool: Arc<Mutex<ProxyTcpConnectionsPool>>,
     pub thread_pool: ThreadPool,
-    pub servers: HashMap<T, Arc<Mutex<Server>>>,
+    pub servers: Arc<Mutex<HashMap<Uuid, Server>>>,
     pub forward: Vec<ProxyForward>,
     pub load_balancer: Option<CloneableFn>,
     pub max_buffer_size: usize,
@@ -52,13 +51,13 @@ pub struct ProxyState {
 
 #[derive(Clone)]
 pub struct CloneableFn(
-    Arc<dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static>,
+    Arc<dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static>,
 );
 
 impl CloneableFn {
     fn new<F>(f: F) -> Self
     where
-        F: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+        F: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
     {
         CloneableFn(Arc::new(f))
     }
@@ -87,10 +86,7 @@ pub struct ProxyConfig {
     pub max_buffer_size: usize,
 }
 
-impl<T> Proxy<T>
-where
-    T: Serialize + for<'de> Deserialize<'de>,
-{
+impl Proxy {
     /// # New Proxy
     ///
     /// This function will create a new Proxy.
@@ -106,7 +102,7 @@ where
                 config.max_connections,
             ))),
             thread_pool: ThreadPool::new(config.threads),
-            servers: HashMap::new(),
+            servers: Arc::new(Mutex::new(HashMap::new())),
             forward: Vec::new(),
             load_balancer: None,
             max_buffer_size: config.max_buffer_size,
@@ -183,11 +179,17 @@ where
     /// ## Arguments
     ///
     /// * `key` - A key of type T.
-    pub fn get_server(&self, key: &T) -> Option<&Arc<Mutex<Server>>>
-    where
-        T: std::cmp::Eq + std::hash::Hash,
-    {
-        self.servers.get(key)
+    pub fn get_server(&self, key: Uuid) -> Option<Server> {
+        match self.servers.lock() {
+            Ok(servers) => match servers.get(&key) {
+                Some(server) => Some(server.clone()),
+                None => None,
+            },
+            Err(e) => {
+                error!("Error getting server: {:?}", e);
+                None
+            }
+        }
     }
 
     /// # Add Server
@@ -198,11 +200,15 @@ where
     ///
     /// * `key` - A key of type T.
     /// * `server` - A Server.
-    pub fn add_server(&mut self, key: T, server: Arc<Mutex<Server>>)
-    where
-        T: std::cmp::Eq + std::hash::Hash,
-    {
-        self.servers.insert(key, server);
+    pub fn add_server(&mut self, key: Uuid, server: Server) {
+        match self.servers.lock() {
+            Ok(mut servers) => {
+                servers.insert(key, server);
+            }
+            Err(e) => {
+                error!("Error adding server: {:?}", e);
+            }
+        }
     }
 
     /// # Remove Server
@@ -212,11 +218,15 @@ where
     /// ## Arguments
     ///
     /// * `key` - A key of type T.
-    pub fn remove_server(&mut self, key: T)
-    where
-        T: std::cmp::Eq + std::hash::Hash,
-    {
-        self.servers.remove(&key);
+    pub fn remove_server(&mut self, key: Uuid) {
+        match self.servers.lock() {
+            Ok(mut servers) => {
+                servers.remove(&key);
+            }
+            Err(e) => {
+                error!("Error removing server: {:?}", e);
+            }
+        }
     }
 
     /// # Get Forwards
@@ -243,9 +253,45 @@ where
 
     pub fn set_load_balancer<K>(&mut self, load_balancer: K)
     where
-        K: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+        K: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
     {
         self.load_balancer = Some(CloneableFn::new(load_balancer));
+    }
+
+    pub fn add_connection_to_server(&self, server_id: Uuid) -> Result<(), ()> {
+        match self.servers.lock() {
+            Ok(mut servers) => {
+                match servers.get_mut(&server_id) {
+                    Some(server) => {
+                        server.increment_active_connections();
+                        Ok(())
+                    },
+                    None => Err(()),
+                }
+            }
+            Err(e) => {
+                error!("Error adding connection to server: {:?}", e);
+                Err(())
+            }
+        }
+    }
+
+    pub fn remove_connection_from_server(&self, server_id: Uuid) -> Result<(), ()> {
+        match self.servers.lock() {
+            Ok(mut servers) => {
+                match servers.get_mut(&server_id) {
+                    Some(server) => {
+                        server.decrement_active_connections();
+                        Ok(())
+                    },
+                    None => Err(()),
+                }
+            }
+            Err(e) => {
+                error!("Error removing connection from server: {:?}", e);
+                Err(())
+            }
+        }
     }
 
     /// # Forward Connection
@@ -263,30 +309,51 @@ where
         forwarder: &ProxyForward,
         conn: &mut MutexGuard<TcpStream>,
         req: &mut Request<Vec<u8>>,
-    ) -> Result<Arc<Mutex<Server>>, (ProxyTcpConnectionError, Option<Arc<Mutex<Server>>>)> {
+    ) -> Result<Server, (ProxyTcpConnectionError, Option<Server>)> {
         // we already have retrieve the matching server/s, but now, we have to select one, based on the load balancer, if any, or just the first one
-        let selected_server_mutex = match self.load_balancer {
+        let selected_server = match self.load_balancer {
             // use the configured load balancer
             Some(ref lb) => {
-                let servers = forwarder.to.clone();
+                let servers_ids = forwarder.to.clone();
+                eprintln!("servers_ids: {:?}", servers_ids);
+
+                let mut servers: Vec<Server> = Vec::new();
+
+                for server_id in servers_ids.iter() {
+                    match self.get_server(*server_id) {
+                        Some(server) => servers.push(server),
+                        None => continue,
+                    };
+                }
+
+                eprintln!("servers: {:?}", servers);
+
                 lb.0(proxy_state.clone(), forwarder, servers)
             }
             // if no load balancer is set, just use the first one
-            None => match forwarder.to.first().as_ref() {
-                Some(&server) => server.clone(),
-                None => return Err((ProxyTcpConnectionError::InternalServerError, None)),
-            },
-        };
-
-        let mut selected_server = match selected_server_mutex.lock() {
-            Ok(server) => server,
-            Err(e) => {
-                error!("Error getting server: {:?}", e);
-                return Err((ProxyTcpConnectionError::InternalServerError, None));
+            None => {
+                let server_id = forwarder.to.first().unwrap();
+                let server = match self.get_server(*server_id) {
+                    Some(server) => server,
+                    None => {
+                        error!("Error getting server");
+                        return Err((ProxyTcpConnectionError::InternalServerError, None));
+                    }
+                };
+                server
             }
         };
 
-        selected_server.increment_active_connections();
+        match self.add_connection_to_server(selected_server.id.clone()) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error adding connection to server: {:?}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server.clone()),
+                ));
+            }
+        }
 
         // Connect to Server address
         let mut stream = match TcpStream::connect(selected_server.address.clone()) {
@@ -328,7 +395,7 @@ where
                 error!("Error writing http request: {:?}", e);
                 return Err((
                     ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server_mutex.clone()),
+                    Some(selected_server.clone()),
                 ));
             }
         };
@@ -339,7 +406,7 @@ where
                 error!("Error writing to stream: {}", e);
                 return Err((
                     ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server_mutex.clone()),
+                    Some(selected_server.clone()),
                 ));
             }
         };
@@ -352,7 +419,7 @@ where
                 error!("Error reading from stream: {}", e);
                 return Err((
                     ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server_mutex.clone()),
+                    Some(selected_server.clone()),
                 ));
             }
         };
@@ -364,7 +431,7 @@ where
                 error!("Error writing to client: {}", e);
                 return Err((
                     ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server_mutex.clone()),
+                    Some(selected_server.clone()),
                 ));
             }
         };
@@ -376,12 +443,23 @@ where
                 error!("Error stopping stream: {:?}", e);
                 return Err((
                     ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server_mutex.clone()),
+                    Some(selected_server.clone()),
                 ));
             }
         };
 
-        Ok(selected_server_mutex.clone())
+        match self.remove_connection_from_server(selected_server.id.clone()) {
+            Ok(_) => (),
+            Err(e) => {
+                error!("Error removing connection from server: {:?}", e);
+                return Err((
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server.clone()),
+                ));
+            }
+        }
+
+        Ok(selected_server.clone())
     }
 
     /// # Listen
@@ -391,8 +469,7 @@ where
     /// The function will bind to the address and listen for incoming connections.
     pub fn listen(&mut self)
     where
-        Proxy<T>: Clone + Send + 'static,
-        T: std::cmp::Eq + std::hash::Hash + Clone + Send + 'static,
+        Proxy: Clone + Send + 'static,
     {
         // Bind to address
         self.listener = match TcpListener::bind(&self.address) {
@@ -486,18 +563,7 @@ pub struct ProxyForward {
 
     pub rewrite_to: Option<Uri>,
 
-    pub round_robin_index: Arc<usize>,
-
-    pub to: Vec<Arc<Mutex<Server>>>,
-}
-
-impl ProxyForward {
-    pub fn next_turn_round_robin(&mut self) {
-        self.round_robin_index = Arc::new(*self.round_robin_index + 1);
-        if self.round_robin_index >= self.to.len().into() {
-            self.round_robin_index = Arc::new(0);
-        }
-    }
+    pub to: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone)]

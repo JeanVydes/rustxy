@@ -6,22 +6,19 @@ use crate::gateway::server::Server;
 
 use super::proxy::{ProxyForward, ProxyState};
 
-pub fn least_connections_load_balancer(_: Arc<Mutex<ProxyState>>, _: &ProxyForward, preselected_servers: Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> {
-    let mut least_connections_server: Option<Arc<Mutex<Server>>> = None;
+pub fn least_connections_load_balancer(
+    _: Arc<Mutex<ProxyState>>,
+    _: &ProxyForward,
+    preselected_servers: Vec<Server>,
+) -> Server {
+    let mut least_connections_server: Option<Server> = None;
     let mut least_connections = usize::max_value();
 
-    for server_mutex in preselected_servers.clone() {
-        match server_mutex.lock() {
-            Ok(server) => {
-                let conn = server.active_connections;
-                if conn < least_connections {
-                    least_connections = conn;
-                    least_connections_server = Some(server_mutex.clone());
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock the server: {}", e);
-            }
+    for server in preselected_servers.clone() {
+        let conn = server.active_connections;
+        if conn < least_connections {
+            least_connections = conn;
+            least_connections_server = Some(server.clone());
         }
     }
 
@@ -33,24 +30,21 @@ pub fn least_connections_load_balancer(_: Arc<Mutex<ProxyState>>, _: &ProxyForwa
     preselected_servers[0].clone()
 }
 
-pub fn weighted_least_connections_load_balancer(_: Arc<Mutex<ProxyState>>, _: &ProxyForward, preselected_servers: Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> {
-    let mut weighted_least_connections_server: Option<Arc<Mutex<Server>>> = None;
+pub fn weighted_least_connections_load_balancer(
+    _: Arc<Mutex<ProxyState>>,
+    _: &ProxyForward,
+    preselected_servers: Vec<Server>,
+) -> Server {
+    let mut weighted_least_connections_server: Option<Server> = None;
     let mut weighted_least_connections = usize::max_value();
 
-    for server_mutex in preselected_servers.clone() {
-        match server_mutex.lock() {
-            Ok(server) => {
-                let conn = server.active_connections;
-                let weight = server.weight;
-                let weighted_conn = conn / weight;
-                if weighted_conn < weighted_least_connections {
-                    weighted_least_connections = weighted_conn;
-                    weighted_least_connections_server = Some(server_mutex.clone());
-                }
-            }
-            Err(e) => {
-                error!("Failed to lock the server: {}", e);
-            }
+    for server in preselected_servers.clone() {
+        let conn = server.active_connections;
+        let weight = server.weight;
+        let weighted_conn = conn / weight;
+        if weighted_conn < weighted_least_connections {
+            weighted_least_connections = weighted_conn;
+            weighted_least_connections_server = Some(server.clone());
         }
     }
 
@@ -61,7 +55,11 @@ pub fn weighted_least_connections_load_balancer(_: Arc<Mutex<ProxyState>>, _: &P
     preselected_servers[0].clone()
 }
 
-pub fn round_robin_load_balancer(state: Arc<Mutex<ProxyState>>, forward: &ProxyForward, preselected_servers: Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> {
+pub fn round_robin_load_balancer(
+    state: Arc<Mutex<ProxyState>>,
+    forward: &ProxyForward,
+    preselected_servers: Vec<Server>,
+) -> Server {
     let mut state = match state.lock() {
         Ok(state) => state,
         Err(e) => {

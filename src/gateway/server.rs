@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use http::{uri::Scheme, Method, Uri};
+use uuid::Uuid;
 
 
 /// # Server
@@ -14,6 +15,7 @@ use http::{uri::Scheme, Method, Uri};
 /// * `endpoints` - The endpoints
 #[derive(Debug, Clone)]
 pub struct Server {
+    pub id: Uuid,
     pub address: SocketAddr,
     pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>,
@@ -32,6 +34,7 @@ pub struct Server {
 /// * `endpoints` - The endpoints
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    pub id: Uuid,
     pub address: SocketAddr,
     pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>,
@@ -51,6 +54,7 @@ pub struct ServerConfig {
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
         Self {
+            id: config.id,
             address: config.address,
             accepted_schemes: config.accepted_schemes,
             endpoints: config.endpoints,
