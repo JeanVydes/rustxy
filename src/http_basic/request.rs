@@ -70,7 +70,7 @@ pub fn parse_http_request(buffer: &[u8]) -> Result<Request<Vec<u8>>, ProxyTcpCon
             return Err(ProxyTcpConnectionError::BadRequest);
         }
     };
-
+    
     // Create the request
     let mut builder = Request::builder().method(method).uri(uri).version(version);
 

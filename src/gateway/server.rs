@@ -21,6 +21,7 @@ pub struct Server {
     pub endpoints: HashMap<Uri, ServerEndpoint>,
     pub active_connections: usize,
     pub weight: usize,
+    pub max_connections: usize,
 }
 
 /// # Server Config
@@ -39,6 +40,7 @@ pub struct ServerConfig {
     pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>,
     pub weight: usize,
+    pub max_connections: usize,
 }
 
 /// # Server
@@ -60,6 +62,7 @@ impl Server {
             endpoints: config.endpoints,
             active_connections: 0,
             weight: config.weight,
+            max_connections: config.max_connections,
         }
     }
 

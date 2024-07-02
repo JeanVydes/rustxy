@@ -39,6 +39,8 @@ pub fn not_found(conn: &mut MutexGuard<TcpStream>) -> Result<(), ProxyTcpConnect
     conn.write_all(&formatted_response)
         .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
 
+    stop_stream(conn)?;
+
     Ok(())
 }
 
@@ -50,6 +52,8 @@ pub fn unauthorized(conn: &mut MutexGuard<TcpStream>) -> Result<(), ProxyTcpConn
     let formatted_response = format_response(res);
     conn.write_all(&formatted_response)
         .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
+
+    stop_stream(conn)?;
 
     Ok(())
 }
@@ -97,6 +101,7 @@ pub fn err_response(
     };
 
     stop_stream(conn)?;
+    
     Ok(())
 }
 

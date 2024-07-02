@@ -1,20 +1,23 @@
-use http::{Request, Uri};
+use http::Request;
 use log::{error, info};
+use native_tls::{Identity, TlsAcceptor};
 use std::{
     collections::HashMap,
-    fmt,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use threadpool::ThreadPool;
 use uuid::{NoContext, Timestamp, Uuid};
 
-use super::connection::{ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool};
+use super::{
+    connection::{ProxyTcpConnection, ProxyTcpConnectionError, ProxyTcpConnectionsPool},
+    forwarder::ProxyForward, load_balancer::LoadBalancer,
+};
 use crate::{
     gateway::server::Server,
-    http_basic::{request::write_http_request, response::stop_stream},
+    http_basic::{request::write_http_request, response::stop_stream, rewrite_path},
 };
 
 /// # Proxy
@@ -29,53 +32,25 @@ use crate::{
 /// * `thread_pool` - A ThreadPool.
 /// * `servers` - A HashMap of type T and Server.
 /// * `forward` - A Vec of ProxyForward.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Proxy {
     pub address: SocketAddr,
     pub listener: Option<Arc<TcpListener>>,
     pub connections_pool: Arc<Mutex<ProxyTcpConnectionsPool>>,
     pub thread_pool: ThreadPool,
     pub servers: Arc<Mutex<HashMap<Uuid, Server>>>,
-    pub forward: Vec<ProxyForward>,
-    pub load_balancer: Option<CloneableFn>,
+    pub forwards: Vec<ProxyForward>,
+    pub load_balancer: Option<LoadBalancer>,
     pub max_buffer_size: usize,
     pub shared_state: Arc<Mutex<ProxyState>>,
+    pub tls_identity: Arc<Identity>,
+    pub tls_acceptor: Arc<TlsAcceptor>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ProxyState {
     // Forwarder -> Round Robin Index
     pub round_robin_index: HashMap<Uuid, u32>,
-
-}
-
-/// # CloneableFn
-/// 
-/// This struct represents a Cloneable Function.
-#[derive(Clone)]
-pub struct CloneableFn(
-    Arc<dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static>,
-);
-
-/// # CloneableFn
-/// 
-/// The implementation of the Cloneable Function
-impl CloneableFn {
-    fn new<F>(f: F) -> Self
-    where
-        F: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
-    {
-        CloneableFn(Arc::new(f))
-    }
-}
-
-/// # Debug for CloneableFn
-/// 
-/// The implementation of the Debug trait for CloneableFn
-impl fmt::Debug for CloneableFn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Closure")
-    }
 }
 
 /// # Proxy Config
@@ -87,12 +62,13 @@ impl fmt::Debug for CloneableFn {
 /// * `address` - A SocketAddr.
 /// * `max_connections` - Max parallel connections.
 /// * `threads` - Threads to use.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone)]
 pub struct ProxyConfig {
     pub address: SocketAddr,
     pub max_connections: usize,
     pub threads: usize,
     pub max_buffer_size: usize,
+    pub tls_identity: Identity,
 }
 
 impl Proxy {
@@ -112,12 +88,14 @@ impl Proxy {
             ))),
             thread_pool: ThreadPool::new(config.threads),
             servers: Arc::new(Mutex::new(HashMap::new())),
-            forward: Vec::new(),
+            forwards: Vec::new(),
             load_balancer: None,
             max_buffer_size: config.max_buffer_size,
             shared_state: Arc::new(Mutex::new(ProxyState {
                 round_robin_index: HashMap::new(),
             })),
+            tls_identity: Arc::new(config.tls_identity.clone()),
+            tls_acceptor: Arc::new(TlsAcceptor::new(config.tls_identity).unwrap()),
         }
     }
 
@@ -133,7 +111,7 @@ impl Proxy {
         &self,
         request: &http::Request<Vec<u8>>,
     ) -> Option<&ProxyForward> {
-        for forward in self.forward.iter() {
+        for forward in self.forwards.iter() {
             if let Some(paths) = forward.match_path.as_ref() {
                 for path in paths.iter() {
                     if path.exactly {
@@ -166,7 +144,7 @@ impl Proxy {
         &self,
         request: &http::Request<Vec<u8>>,
     ) -> Option<&ProxyForward> {
-        for forward in self.forward.iter() {
+        for forward in self.forwards.iter() {
             if let Some(headers) = forward.match_headers.as_ref() {
                 let all_headers_match = headers
                     .iter()
@@ -246,7 +224,7 @@ impl Proxy {
     ///
     /// This function will return a reference to the forward Vec.
     pub fn get_forwards(&self) -> &Vec<ProxyForward> {
-        &self.forward
+        &self.forwards
     }
 
     /// # Add Forward
@@ -257,19 +235,19 @@ impl Proxy {
     ///
     /// * `forward` - A ProxyForward.
     pub fn add_forward(&mut self, forward: ProxyForward) {
-        self.forward.push(forward.clone());
+        self.forwards.push(forward.clone());
     }
 
     /// # Set Load Balancer
-    /// 
+    ///
     /// This function will set the load balancer for the Proxy.
-    /// 
+    ///
     /// /// ## Arguments
-    /// 
+    ///
     /// * `load_balancer` - A closure that receives the internal state of the proxy, the forwarder and the preselected servers and returns a Server.
-    /// 
+    ///
     /// ## Example
-    /// 
+    ///
     /// ```rust
     /// my_proxy.set_load_balancer(|proxy_state, forwarder, preselected_servers| {
     ///     // proxy_state: internal state of the proxy
@@ -285,17 +263,17 @@ impl Proxy {
     where
         K: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
     {
-        self.load_balancer = Some(CloneableFn::new(load_balancer));
+        self.load_balancer = Some(LoadBalancer::new(load_balancer));
     }
 
     /// # Add Connection to Server
-    /// 
+    ///
     /// This function will add a connection (the count) to a Server.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `server_id` - A Uuid.
-    pub fn add_connection_to_server(&self, server_id: Uuid) -> Result<(), ()> {
+    pub fn add_connection_count_to_server(&self, server_id: Uuid) -> Result<(), ()> {
         match self.servers.lock() {
             Ok(mut servers) => {
                 match servers.get_mut(&server_id) {
@@ -303,7 +281,7 @@ impl Proxy {
                         // Increment active connections
                         server.increment_active_connections();
                         Ok(())
-                    },
+                    }
                     None => Err(()),
                 }
             }
@@ -315,23 +293,21 @@ impl Proxy {
     }
 
     /// # Remove Connection from Server
-    /// 
+    ///
     /// This function will remove a connection (the count) from a Server.
-    /// 
+    ///
     /// ## Arguments
-    /// 
+    ///
     /// * `server_id` - A Uuid.
-    pub fn remove_connection_from_server(&self, server_id: Uuid) -> Result<(), ()> {
+    pub fn remove_connection_count_from_server(&self, server_id: Uuid) -> Result<(), ()> {
         match self.servers.lock() {
-            Ok(mut servers) => {
-                match servers.get_mut(&server_id) {
-                    Some(server) => {
-                        server.decrement_active_connections();
-                        Ok(())
-                    },
-                    None => Err(()),
+            Ok(mut servers) => match servers.get_mut(&server_id) {
+                Some(server) => {
+                    server.decrement_active_connections();
+                    Ok(())
                 }
-            }
+                None => Err(()),
+            },
             Err(e) => {
                 error!("Error removing connection from server: {:?}", e);
                 Err(())
@@ -352,8 +328,111 @@ impl Proxy {
         &self,
         proxy_state: Arc<Mutex<ProxyState>>,
         forwarder: &ProxyForward,
-        conn: &mut MutexGuard<TcpStream>,
+        nottls_client_stream: &mut TcpStream,
         req: &mut Request<Vec<u8>>,
+    ) -> Result<Server, (ProxyTcpConnectionError, Option<Server>)> {
+        let selected_server = match self.get_selected_server(forwarder, proxy_state.clone()) {
+            Ok(server) => server,
+            Err((e, server)) => return Err((e, server)),
+        };
+
+        // Connect to Server address
+        let mut server_stream = match TcpStream::connect(selected_server.address.clone()) {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!("Error connecting to server: {}", e);
+                return Err((ProxyTcpConnectionError::InternalServerError, None));
+            }
+        };
+
+        self.set_server_stream_timeout(&mut server_stream)
+            .map_err(|e| {
+                error!("Error setting server stream timeout: {:?}", e);
+                (
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server.clone()),
+                )
+            })?;
+
+        let middlewares = match forwarder.middlewares.lock() {
+            Ok(middlewares) => middlewares,
+            Err(e) => {
+                error!("Error getting middlewares: {:?}", e);
+                return Err((ProxyTcpConnectionError::InternalServerError, None));
+            }
+        };
+
+        // Rewrite request path
+        if let Some(rewrite_to) = forwarder.rewrite_path.as_ref() {
+            if req.uri().path_and_query().is_some() {
+                let new_path = rewrite_path(req.uri(), rewrite_to, forwarder);
+                *req.uri_mut() = new_path.parse().unwrap_or(req.uri().clone());
+            }
+        }
+
+        for middleware in middlewares.values() {
+            *req = middleware.0(proxy_state.clone(), forwarder, selected_server.clone(), req.clone());
+        }
+
+        // Write request again to buffer
+        let mut buffer = Vec::new();
+        write_http_request(&mut buffer, &req).map_err(|e| {
+            error!("Error writing to buffer: {}", e);
+            (
+                ProxyTcpConnectionError::InternalServerError,
+                Some(selected_server.clone()),
+            )
+        })?;
+
+        // Write request to server
+        server_stream.write_all(&buffer).map_err(|e| {
+            error!("Error writing to stream: {}", e);
+            (
+                ProxyTcpConnectionError::InternalServerError,
+                Some(selected_server.clone()),
+            )
+        })?;
+
+        // Read response from server
+        let mut server_response = Vec::new();
+        server_stream
+            .read_to_end(&mut server_response)
+            .map_err(|e| {
+                error!("Error reading from stream: {}", e);
+                (
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server.clone()),
+                )
+            })?;
+
+        // Write response from server to client
+        nottls_client_stream
+            .write_all(&server_response)
+            .map_err(|e| {
+                error!("Error writing to stream: {}", e);
+                (
+                    ProxyTcpConnectionError::InternalServerError,
+                    Some(selected_server.clone()),
+                )
+            })?;
+
+        // Stop the stream with the proxied server
+        stop_stream(&mut server_stream).map_err(|e| {
+            error!("Error stopping stream: {:?}", e);
+            (
+                ProxyTcpConnectionError::InternalServerError,
+                Some(selected_server.clone()),
+            )
+        })?;
+
+        let _ = self.remove_connection_count_from_server(selected_server.id.clone());
+        Ok(selected_server.clone())
+    }
+
+    pub fn get_selected_server(
+        &self,
+        forwarder: &ProxyForward,
+        proxy_state: Arc<Mutex<ProxyState>>,
     ) -> Result<Server, (ProxyTcpConnectionError, Option<Server>)> {
         // we already have retrieve the matching server/s, but now, we have to select one, based on the load balancer, if any, or just the first one
         let selected_server = match self.load_balancer {
@@ -385,7 +464,14 @@ impl Proxy {
             }
         };
 
-        match self.add_connection_to_server(selected_server.id.clone()) {
+        if selected_server.active_connections >= selected_server.max_connections {
+            return Err((
+                ProxyTcpConnectionError::TooManyConnections,
+                Some(selected_server.clone()),
+            ));
+        }
+
+        match self.add_connection_count_to_server(selected_server.id.clone()) {
             Ok(_) => (),
             Err(e) => {
                 error!("Error adding connection to server: {:?}", e);
@@ -396,111 +482,30 @@ impl Proxy {
             }
         }
 
-        // Connect to Server address
-        let mut stream = match TcpStream::connect(selected_server.address.clone()) {
-            Ok(stream) => stream,
+        Ok(selected_server)
+    }
+
+    pub fn set_server_stream_timeout(
+        &self,
+        stream: &mut TcpStream,
+    ) -> Result<(), ProxyTcpConnectionError> {
+        match stream.set_read_timeout(Some(Duration::from_secs(5))) {
+            Ok(_) => (),
             Err(e) => {
-                error!("Error connecting to server: {}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    None,
-                ));
+                error!("Error setting read timeout: {}", e);
+                return Err(ProxyTcpConnectionError::InternalServerError);
             }
         };
 
-        // Set timeouts
-        let _ = stream
-            .set_read_timeout(Some(Duration::new(5, 0)))
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError);
-        let _ = stream
-            .set_write_timeout(Some(Duration::new(5, 0)))
-            .map_err(|_| ProxyTcpConnectionError::InternalServerError);
-
-        // Rewrite request path
-        match forwarder.rewrite_to.as_ref() {
-            Some(rewrite_to) => {
-                if req.uri().path_and_query().is_some() {
-                    let queries = req.uri().path_and_query().unwrap().query().unwrap_or("");
-                    let full_new_path = format!("{}?{}", rewrite_to.path(), queries);
-                    *req.uri_mut() = full_new_path.parse().unwrap_or(req.uri().clone());
-                }
-            }
-            None => (),
-        }
-
-        // Write request again to buffer
-        let mut buffer = Vec::new();
-        match write_http_request(&mut buffer, &req) {
+        match stream.set_write_timeout(Some(Duration::from_secs(5))) {
             Ok(_) => (),
             Err(e) => {
-                error!("Error writing http request: {:?}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
+                error!("Error setting write timeout: {}", e);
+                return Err(ProxyTcpConnectionError::InternalServerError);
             }
         };
 
-        match stream.write_all(&buffer) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error writing to stream: {}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
-            }
-        };
-
-        // Read response from server
-        let mut server_response = Vec::new();
-        match stream.read_to_end(&mut server_response) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error reading from stream: {}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
-            }
-        };
-
-        // Write response to client
-        match conn.write_all(&server_response) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error writing to client: {}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
-            }
-        };
-
-        // Stop the stream with the proxied server
-        match stop_stream(&mut stream) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error stopping stream: {:?}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
-            }
-        };
-
-        match self.remove_connection_from_server(selected_server.id.clone()) {
-            Ok(_) => (),
-            Err(e) => {
-                error!("Error removing connection from server: {:?}", e);
-                return Err((
-                    ProxyTcpConnectionError::InternalServerError,
-                    Some(selected_server.clone()),
-                ));
-            }
-        }
-
-        Ok(selected_server.clone())
+        Ok(())
     }
 
     /// # Listen
@@ -510,7 +515,7 @@ impl Proxy {
     /// The function will bind to the address and listen for incoming connections.
     pub fn listen(&mut self)
     where
-        Proxy: Clone + Send + 'static,
+        Proxy: Clone + 'static,
     {
         // Bind to address
         self.listener = match TcpListener::bind(&self.address) {
@@ -591,50 +596,4 @@ impl Proxy {
             }
         }
     }
-}
-
-
-/// # Proxy Forward
-/// 
-/// This struct represents a Proxy Forward.
-/// This is used to set rules to forward a request to a Server.
-/// 
-/// ## Fields
-/// 
-/// * `id` - A Uuid.
-/// * `match_headers` - A Vec of Strings representing the headers to match.
-/// * `match_query` - A Vec of Strings representing the query to match.
-/// * `match_path` - A Vec of ProxyForwardPath representing the paths to match.
-/// * `match_method` - A Vec of Strings representing the methods to match.
-/// * `rewrite_to` - An Option of Uri to rewrite the request path to.
-/// * `to` - A Vec of Uuid representing the servers to forward the request.
-#[derive(Debug, Clone)]
-pub struct ProxyForward {
-    pub id: Uuid,
-    
-    pub match_headers: Option<Vec<String>>,
-    pub match_query: Option<Vec<String>>,
-    pub match_path: Option<Vec<ProxyForwardPath>>,
-    pub match_method: Option<Vec<String>>,
-
-    pub rewrite_to: Option<Uri>,
-
-    pub to: Vec<Uuid>,
-}
-
-/// # Proxy Forward Path
-/// 
-/// This struct represents a Proxy Forward Path.
-/// This is used to set rules to match a path.
-/// 
-/// ## Fields
-/// 
-/// * `path` - A Uri.
-/// * `exactly` - A bool to match exactly.
-/// * `starts_with` - A bool to match if the path starts with.
-#[derive(Debug, Clone)]
-pub struct ProxyForwardPath {
-    pub path: Uri,
-    pub exactly: bool,
-    pub starts_with: bool,
 }

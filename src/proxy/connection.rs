@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::http_basic::request::parse_http_request;
 use crate::http_basic::response::{bad_request, err_response, internal_server_error, not_found, stop_stream};
 
-use super::proxy::{Proxy, ProxyForward};
+use super::forwarder::ProxyForward;
+use super::proxy::Proxy;
 
 #[derive(Debug)]
 pub enum ProxyTcpConnectionError {
@@ -18,6 +19,7 @@ pub enum ProxyTcpConnectionError {
     Forbidden,
     BadRequest,
     MethodNotAllowed,
+    TooManyConnections,
 }
 
 /// The type of the connection id for the tcp connection is a UUID
@@ -201,7 +203,7 @@ pub fn handle_connection(
     match selected_forwarder {
         Some(forwarder) => {
             match proxy
-                .forward_conn(proxy.shared_state.clone(), forwarder, &mut stream, &mut req)
+                .forward_conn(proxy.shared_state.clone(), forwarder, &mut *stream, &mut req)
                 .map_err(|e| e)
             {
                 Ok(_) => (),
@@ -225,7 +227,7 @@ pub fn handle_connection(
         }
     }
 
-    // Stop the stream
+    // Stop the strea
     match stop_stream(&mut stream) {
         Ok(_) => {}
         Err(_) => {

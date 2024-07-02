@@ -1,10 +1,44 @@
-use std::sync::{Arc, Mutex};
+use std::{fmt, sync::{Arc, Mutex}};
 
 use log::error;
 
 use crate::gateway::server::Server;
 
-use super::proxy::{ProxyForward, ProxyState};
+use super::{forwarder::ProxyForward, proxy::ProxyState};
+
+/// # Load Balancer
+///
+/// This struct represents a Load Balancer Function.
+#[derive(Clone)]
+pub struct LoadBalancer (
+    pub Arc<
+        dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server
+            + Send
+            + Sync
+            + 'static,
+    >,
+);
+
+/// # Load Balancer
+///
+/// The implementation of the Load Balancer Function
+impl LoadBalancer {
+    pub fn new<F>(f: F) -> Self
+    where
+        F: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
+    {
+        LoadBalancer(Arc::new(f))
+    }
+}
+
+/// # Debug for Load Balancer
+///
+/// The implementation of the Debug trait for Load Balancer
+impl fmt::Debug for LoadBalancer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Closure")
+    }
+}
 
 /// # Least Connections Load Balancer
 /// 
