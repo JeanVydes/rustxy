@@ -2,6 +2,13 @@
 
 The Rust Reverse Proxy, build your own reverse proxy in minutes with wonderful features, all customizable.
 
+You need to create certificates
+
+```
+openssl genpkey -algorithm RSA -out key.pem
+openssl req -x509 -new -key key.pem -out cert.pem -days 365
+```
+
 ## Example
 
 ```rust
