@@ -1,5 +1,6 @@
 [package]
 name = "rustxy"
+description = "The Rust Reverse Proxy"
 version = "0.1.1"
 edition = "2021"
 readme = "README.md"
