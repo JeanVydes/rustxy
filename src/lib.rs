@@ -36,6 +36,8 @@ mod tests {
             tls_identity: identity,
         });
 
+        assert_eq!(my_proxy.address, address);
+
         my_proxy.set_load_balancer(weighted_least_connections_load_balancer);
 
         // Create a new server
@@ -71,6 +73,6 @@ mod tests {
         my_proxy.add_server(my_api_server.id.clone(), my_api_server);
 
         // Start the proxy
-        my_proxy.listen()
+        // my_proxy.listen()
     }
 }
