@@ -6,6 +6,15 @@ use crate::gateway::server::Server;
 
 use super::proxy::{ProxyForward, ProxyState};
 
+/// # Least Connections Load Balancer
+/// 
+/// This load balancer return the server with least connections
+/// 
+/// ## Example
+/// 
+/// ```rust
+/// proxy.set_load_balancer(least_connections_load_balancer);
+/// ```
 pub fn least_connections_load_balancer(
     _: Arc<Mutex<ProxyState>>,
     _: &ProxyForward,
@@ -23,13 +32,21 @@ pub fn least_connections_load_balancer(
     }
 
     if let Some(server) = &least_connections_server {
-        println!("Selected server with least connections: {:?}", server);
         return server.clone();
     }
 
     preselected_servers[0].clone()
 }
 
+/// # Weighted Least Connections Load Balancer
+/// 
+/// This load balancer return the server depending on the weight and the least connections
+/// 
+/// ## Example
+/// 
+/// ```rust
+/// proxy.set_load_balancer(weighted_least_connections_load_balancer);
+/// ```
 pub fn weighted_least_connections_load_balancer(
     _: Arc<Mutex<ProxyState>>,
     _: &ProxyForward,
@@ -55,6 +72,15 @@ pub fn weighted_least_connections_load_balancer(
     preselected_servers[0].clone()
 }
 
+/// # Round Robin Load Balancer
+/// 
+/// This load balancer return the server in a round robin fashion
+/// 
+/// ## Example
+/// 
+/// ```rust
+/// proxy.set_load_balancer(round_robin_load_balancer);
+/// ```
 pub fn round_robin_load_balancer(
     state: Arc<Mutex<ProxyState>>,
     forward: &ProxyForward,

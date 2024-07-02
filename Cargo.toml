@@ -1,7 +1,11 @@
 [package]
 name = "rustxy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/JeanVydes/rustxy"
+keywords = ["rustxy", "proxy", "reverse", "network"]
 
 [dependencies]
 chrono = "0.4.38"

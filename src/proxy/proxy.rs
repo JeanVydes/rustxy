@@ -49,11 +49,17 @@ pub struct ProxyState {
 
 }
 
+/// # CloneableFn
+/// 
+/// This struct represents a Cloneable Function.
 #[derive(Clone)]
 pub struct CloneableFn(
     Arc<dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static>,
 );
 
+/// # CloneableFn
+/// 
+/// The implementation of the Cloneable Function
 impl CloneableFn {
     fn new<F>(f: F) -> Self
     where
@@ -63,6 +69,9 @@ impl CloneableFn {
     }
 }
 
+/// # Debug for CloneableFn
+/// 
+/// The implementation of the Debug trait for CloneableFn
 impl fmt::Debug for CloneableFn {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Closure")
@@ -251,6 +260,27 @@ impl Proxy {
         self.forward.push(forward.clone());
     }
 
+    /// # Set Load Balancer
+    /// 
+    /// This function will set the load balancer for the Proxy.
+    /// 
+    /// /// ## Arguments
+    /// 
+    /// * `load_balancer` - A closure that receives the internal state of the proxy, the forwarder and the preselected servers and returns a Server.
+    /// 
+    /// ## Example
+    /// 
+    /// ```rust
+    /// my_proxy.set_load_balancer(|proxy_state, forwarder, preselected_servers| {
+    ///     // proxy_state: internal state of the proxy
+    ///     // forwarder: the forwarder for the request, selected from matching certain criteria like path, methods or other things
+    ///     // preselected_servers: the servers that are preselected for the forwarder
+
+    ///     // You have to return a server to process the request
+    ///     // Check in src/proxy/load_balancer.rs for pre-built load balancers
+    ///     preselected_servers[0].clone()
+    /// });
+    /// ```
     pub fn set_load_balancer<K>(&mut self, load_balancer: K)
     where
         K: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Server>) -> Server + Send + Sync + 'static,
@@ -258,11 +288,19 @@ impl Proxy {
         self.load_balancer = Some(CloneableFn::new(load_balancer));
     }
 
+    /// # Add Connection to Server
+    /// 
+    /// This function will add a connection (the count) to a Server.
+    /// 
+    /// ## Arguments
+    /// 
+    /// * `server_id` - A Uuid.
     pub fn add_connection_to_server(&self, server_id: Uuid) -> Result<(), ()> {
         match self.servers.lock() {
             Ok(mut servers) => {
                 match servers.get_mut(&server_id) {
                     Some(server) => {
+                        // Increment active connections
                         server.increment_active_connections();
                         Ok(())
                     },
@@ -276,6 +314,13 @@ impl Proxy {
         }
     }
 
+    /// # Remove Connection from Server
+    /// 
+    /// This function will remove a connection (the count) from a Server.
+    /// 
+    /// ## Arguments
+    /// 
+    /// * `server_id` - A Uuid.
     pub fn remove_connection_from_server(&self, server_id: Uuid) -> Result<(), ()> {
         match self.servers.lock() {
             Ok(mut servers) => {
@@ -548,6 +593,21 @@ impl Proxy {
     }
 }
 
+
+/// # Proxy Forward
+/// 
+/// This struct represents a Proxy Forward.
+/// This is used to set rules to forward a request to a Server.
+/// 
+/// ## Fields
+/// 
+/// * `id` - A Uuid.
+/// * `match_headers` - A Vec of Strings representing the headers to match.
+/// * `match_query` - A Vec of Strings representing the query to match.
+/// * `match_path` - A Vec of ProxyForwardPath representing the paths to match.
+/// * `match_method` - A Vec of Strings representing the methods to match.
+/// * `rewrite_to` - An Option of Uri to rewrite the request path to.
+/// * `to` - A Vec of Uuid representing the servers to forward the request.
 #[derive(Debug, Clone)]
 pub struct ProxyForward {
     pub id: Uuid,
@@ -562,6 +622,16 @@ pub struct ProxyForward {
     pub to: Vec<Uuid>,
 }
 
+/// # Proxy Forward Path
+/// 
+/// This struct represents a Proxy Forward Path.
+/// This is used to set rules to match a path.
+/// 
+/// ## Fields
+/// 
+/// * `path` - A Uri.
+/// * `exactly` - A bool to match exactly.
+/// * `starts_with` - A bool to match if the path starts with.
 #[derive(Debug, Clone)]
 pub struct ProxyForwardPath {
     pub path: Uri,

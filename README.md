@@ -1,6 +1,6 @@
 # RUSTXY
 
-The Rust Reverse Proxy, build your own proxy in minutes
+The Rust Reverse Proxy, build your own reverse proxy in minutes with wonderful features, all customizable.
 
 ## Example
 
@@ -21,7 +21,7 @@ The Rust Reverse Proxy, build your own proxy in minutes
         // Create a new server
         let my_api_server = gateway::server::Server::new(ServerConfig {
             id: Uuid::new_v4(), // An internal ID
-            address: SocketAddr::from(([127, 0, 0, 1], 8081)), // The local address to start listening to
+            address: SocketAddr::from(([127, 0, 0, 1], 8081)), // The external service address
             accepted_schemes: vec![Scheme::HTTP, Scheme::HTTPS], // The schemas that the server receive
             endpoints: Default::default(), // Not useful now, maybe in the future versions
             weight: 1, // Weight of the server, useful for the load balancing, more weight = more resources = more assigned requests
