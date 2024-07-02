@@ -79,6 +79,8 @@ pub fn bad_request(conn: &mut MutexGuard<TcpStream>) -> Result<(), ProxyTcpConne
     conn.write_all(&formatted_response)
         .map_err(|_| ProxyTcpConnectionError::InternalServerError)?;
 
+    stop_stream(conn)?;
+
     Ok(())
 }
 
@@ -86,13 +88,16 @@ pub fn err_response(
     conn: &mut MutexGuard<TcpStream>,
     error: ProxyTcpConnectionError,
 ) -> Result<(), ProxyTcpConnectionError> {
-    match error {
+    let _ = match error {
         ProxyTcpConnectionError::NotFound => not_found(conn),
         ProxyTcpConnectionError::Unauthorized => unauthorized(conn),
         ProxyTcpConnectionError::InternalServerError => internal_server_error(conn),
         ProxyTcpConnectionError::BadRequest => bad_request(conn),
         _ => internal_server_error(conn),
-    }
+    };
+
+    stop_stream(conn)?;
+    Ok(())
 }
 
 pub fn stop_stream(stream: &mut TcpStream) -> Result<(), ProxyTcpConnectionError> {

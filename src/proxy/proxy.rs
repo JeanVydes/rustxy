@@ -40,17 +40,25 @@ pub struct Proxy<T> {
     pub forward: Vec<ProxyForward>,
     pub load_balancer: Option<CloneableFn>,
     pub max_buffer_size: usize,
+    pub shared_state: Arc<Mutex<ProxyState>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyState {
+    // Forwarder -> Round Robin Index
+    pub round_robin_index: HashMap<Uuid, u32>,
+
 }
 
 #[derive(Clone)]
 pub struct CloneableFn(
-    Arc<dyn Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static>,
+    Arc<dyn Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static>,
 );
 
 impl CloneableFn {
     fn new<F>(f: F) -> Self
     where
-        F: Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+        F: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
     {
         CloneableFn(Arc::new(f))
     }
@@ -102,6 +110,9 @@ where
             forward: Vec::new(),
             load_balancer: None,
             max_buffer_size: config.max_buffer_size,
+            shared_state: Arc::new(Mutex::new(ProxyState {
+                round_robin_index: HashMap::new(),
+            })),
         }
     }
 
@@ -122,11 +133,11 @@ where
                 for path in paths.iter() {
                     if path.exactly {
                         if path.path.path() == request.uri().path() {
-                            return Some(&forward);
+                            return Some(forward);
                         }
                     } else if path.starts_with {
                         if request.uri().path().starts_with(path.path.path()) {
-                            return Some(&forward);
+                            return Some(forward);
                         }
                     }
                 }
@@ -157,7 +168,7 @@ where
                     .all(|header| request.headers().get(header).is_some());
 
                 if all_headers_match {
-                    return Some(&forward);
+                    return Some(forward);
                 }
             }
         }
@@ -232,7 +243,7 @@ where
 
     pub fn set_load_balancer<K>(&mut self, load_balancer: K)
     where
-        K: Fn(Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
+        K: Fn(Arc<Mutex<ProxyState>>, &ProxyForward, Vec<Arc<Mutex<Server>>>) -> Arc<Mutex<Server>> + Send + Sync + 'static,
     {
         self.load_balancer = Some(CloneableFn::new(load_balancer));
     }
@@ -248,6 +259,7 @@ where
     /// * `req` - A mutable reference to a Request<Vec<u8>>.
     pub fn forward_conn(
         &self,
+        proxy_state: Arc<Mutex<ProxyState>>,
         forwarder: &ProxyForward,
         conn: &mut MutexGuard<TcpStream>,
         req: &mut Request<Vec<u8>>,
@@ -257,7 +269,7 @@ where
             // use the configured load balancer
             Some(ref lb) => {
                 let servers = forwarder.to.clone();
-                lb.0(servers)
+                lb.0(proxy_state.clone(), forwarder, servers)
             }
             // if no load balancer is set, just use the first one
             None => match forwarder.to.first().as_ref() {
@@ -274,13 +286,7 @@ where
             }
         };
 
-        let accepted_scheme = &selected_server.accepted_schemes.iter().any(|scheme| {
-            scheme.as_str() == req.uri().scheme_str().unwrap_or_default()
-        });
-
-        if !accepted_scheme {
-            return Err((ProxyTcpConnectionError::Unauthorized, Some(selected_server_mutex.clone())));
-        }
+        selected_server.increment_active_connections();
 
         // Connect to Server address
         let mut stream = match TcpStream::connect(selected_server.address.clone()) {
@@ -293,8 +299,6 @@ where
                 ));
             }
         };
-
-        selected_server.increment_active_connections();
 
         // Set timeouts
         let _ = stream
@@ -365,7 +369,7 @@ where
             }
         };
 
-        // Stop the stream
+        // Stop the stream with the proxied server
         match stop_stream(&mut stream) {
             Ok(_) => (),
             Err(e) => {
@@ -473,6 +477,8 @@ where
 
 #[derive(Debug, Clone)]
 pub struct ProxyForward {
+    pub id: Uuid,
+    
     pub match_headers: Option<Vec<String>>,
     pub match_query: Option<Vec<String>>,
     pub match_path: Option<Vec<ProxyForwardPath>>,
@@ -480,7 +486,18 @@ pub struct ProxyForward {
 
     pub rewrite_to: Option<Uri>,
 
+    pub round_robin_index: Arc<usize>,
+
     pub to: Vec<Arc<Mutex<Server>>>,
+}
+
+impl ProxyForward {
+    pub fn next_turn_round_robin(&mut self) {
+        self.round_robin_index = Arc::new(*self.round_robin_index + 1);
+        if self.round_robin_index >= self.to.len().into() {
+            self.round_robin_index = Arc::new(0);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

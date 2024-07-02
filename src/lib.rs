@@ -9,10 +9,11 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use gateway::server::{Server, ServerConfig, ServerEndpoint};
+    use gateway::server::{ServerConfig, ServerEndpoint};
     use http::{uri::Scheme, Uri};
     use log::error;
-    use proxy::proxy::{ProxyConfig, ProxyForward, ProxyForwardPath};
+    use proxy::{load_balancer::{round_robin_load_balancer, weighted_least_connections_load_balancer}, proxy::{ProxyConfig, ProxyForward, ProxyForwardPath}};
+    use uuid::Uuid;
 
     use super::*;
 
@@ -24,35 +25,10 @@ mod tests {
             address,
             max_connections: 100,
             threads: 1,
-            max_buffer_size: 1,
+            max_buffer_size: 2048,
         });
 
-        my_proxy.set_load_balancer(|preselected_servers| {
-            let mut least_connections_server: Option<Arc<Mutex<Server>>> = None;
-            let mut least_connections = usize::max_value();
-
-            for server_mutex in preselected_servers.clone() {
-                match server_mutex.lock() {
-                    Ok(server) => {
-                        let conn = server.active_connections;
-                        if conn < least_connections {
-                            least_connections = conn;
-                            least_connections_server = Some(server_mutex.clone());
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to lock the server: {}", e);
-                    }
-                }
-            }
-
-            if let Some(server) = &least_connections_server {
-                println!("Selected server with least connections: {:?}", server);
-                return server.clone();
-            }
-
-            preselected_servers[0].clone()
-        });
+        my_proxy.set_load_balancer(round_robin_load_balancer);
 
         // Create the address for our backend server
         let my_api_address = SocketAddr::from(([127, 0, 0, 1], 8081));
@@ -62,9 +38,10 @@ mod tests {
             address: my_api_address,
             accepted_schemes: vec![Scheme::HTTP, Scheme::HTTPS],
             endpoints: Default::default(),
+            weight: 1,
         })));
 
-        let uri = Uri::from_static("/");
+        /*let uri = Uri::from_static("/");
 
         // Add an endpoint for our backend server
         match my_api_server.lock() {
@@ -79,10 +56,11 @@ mod tests {
             Err(e) => {
                 error!("Failed to lock the server: {}", e);
             }
-        }
+        }*/
 
         // Add a forward rule
         my_proxy.add_forward(ProxyForward {
+            id: Uuid::new_v4(),
             match_headers: None,
             match_query: None,
             match_method: None,
@@ -93,8 +71,9 @@ mod tests {
             }]),
 
             rewrite_to: None,
+            round_robin_index: Arc::new(0),
 
-            to: vec![my_api_server.clone()],
+            to: vec![my_api_server.clone(), my_api_server.clone(), my_api_server.clone()],
         });
 
         // Add the server to the proxy

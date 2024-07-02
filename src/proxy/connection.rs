@@ -205,7 +205,7 @@ where
     match selected_forwarder {
         Some(forwarder) => {
             match proxy
-                .forward_conn(&forwarder, &mut stream, &mut req)
+                .forward_conn(proxy.shared_state.clone(), forwarder, &mut stream, &mut req)
                 .map_err(|e| e)
             {
                 Ok(server) => {

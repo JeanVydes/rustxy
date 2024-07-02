@@ -18,6 +18,7 @@ pub struct Server {
     pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>,
     pub active_connections: usize,
+    pub weight: usize,
 }
 
 /// # Server Config
@@ -33,7 +34,8 @@ pub struct Server {
 pub struct ServerConfig {
     pub address: SocketAddr,
     pub accepted_schemes: Vec<Scheme>,
-    pub endpoints: HashMap<Uri, ServerEndpoint>
+    pub endpoints: HashMap<Uri, ServerEndpoint>,
+    pub weight: usize,
 }
 
 /// # Server
@@ -53,6 +55,7 @@ impl Server {
             accepted_schemes: config.accepted_schemes,
             endpoints: config.endpoints,
             active_connections: 0,
+            weight: config.weight,
         }
     }
 
