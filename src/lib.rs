@@ -19,8 +19,8 @@ mod tests {
     #[test]
     fn it_works() {
         let identity = match Identity::from_pkcs8(
-            include_bytes!("../cert.pem"),
-            include_bytes!("../key.pem"),
+            include_bytes!("../test/cert.pem"),
+            include_bytes!("../test/key.pem"),
         ) {
             Ok(identity) => identity,
             Err(e) => panic!("Error loading identity: {:?}", e),
