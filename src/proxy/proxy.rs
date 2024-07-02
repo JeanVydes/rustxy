@@ -315,8 +315,6 @@ impl Proxy {
             // use the configured load balancer
             Some(ref lb) => {
                 let servers_ids = forwarder.to.clone();
-                eprintln!("servers_ids: {:?}", servers_ids);
-
                 let mut servers: Vec<Server> = Vec::new();
 
                 for server_id in servers_ids.iter() {
@@ -325,8 +323,6 @@ impl Proxy {
                         None => continue,
                     };
                 }
-
-                eprintln!("servers: {:?}", servers);
 
                 lb.0(proxy_state.clone(), forwarder, servers)
             }

@@ -69,13 +69,10 @@ pub fn round_robin_load_balancer(
     };
 
     let index = state.round_robin_index.entry(forward.id).or_insert(0);
-    eprintln!("Round robin index for forwarder {}: {}", forward.id, *index);
-
     let server = preselected_servers[*index as usize].clone();
 
     *index += 1;
     if *index >= preselected_servers.len() as u32 {
-        eprintln!("Resetting round robin index for forwarder: {}", forward.id);
         *index = 0;
     }
 

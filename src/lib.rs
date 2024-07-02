@@ -4,14 +4,14 @@ pub mod proxy;
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::SocketAddr,
-    };
+    use std::net::SocketAddr;
 
-    use gateway::server::{ServerConfig, ServerEndpoint};
+    use gateway::server::ServerConfig;
     use http::{uri::Scheme, Uri};
-    use log::error;
-    use proxy::{load_balancer::{round_robin_load_balancer, weighted_least_connections_load_balancer}, proxy::{ProxyConfig, ProxyForward, ProxyForwardPath}};
+    use proxy::{
+        load_balancer::weighted_least_connections_load_balancer,
+        proxy::{ProxyConfig, ProxyForward, ProxyForwardPath},
+    };
     use uuid::Uuid;
 
     use super::*;
@@ -51,7 +51,11 @@ mod tests {
 
             rewrite_to: None,
 
-            to: vec![my_api_server.id.clone(), my_api_server.id.clone(), my_api_server.id.clone()],
+            to: vec![
+                my_api_server.id.clone(),
+                my_api_server.id.clone(),
+                my_api_server.id.clone(),
+            ],
         });
 
         // Add the server to the proxy
