@@ -1,6 +1,5 @@
 use http::Request;
 use log::{error, info};
-use native_tls::{Identity, TlsAcceptor};
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -43,8 +42,6 @@ pub struct Proxy {
     pub load_balancer: Option<LoadBalancer>,
     pub max_buffer_size: usize,
     pub shared_state: Arc<Mutex<ProxyState>>,
-    pub tls_identity: Arc<Identity>,
-    pub tls_acceptor: Arc<TlsAcceptor>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +65,6 @@ pub struct ProxyConfig {
     pub max_connections: usize,
     pub threads: usize,
     pub max_buffer_size: usize,
-    pub tls_identity: Identity,
 }
 
 impl Proxy {
@@ -94,8 +90,6 @@ impl Proxy {
             shared_state: Arc::new(Mutex::new(ProxyState {
                 round_robin_index: HashMap::new(),
             })),
-            tls_identity: Arc::new(config.tls_identity.clone()),
-            tls_acceptor: Arc::new(TlsAcceptor::new(config.tls_identity).unwrap()),
         }
     }
 
@@ -187,10 +181,10 @@ impl Proxy {
     ///
     /// * `key` - A key of type T.
     /// * `server` - A Server.
-    pub fn add_server(&mut self, key: Uuid, server: Server) {
+    pub fn add_server(&mut self, server: Server) {
         match self.servers.lock() {
             Ok(mut servers) => {
-                servers.insert(key, server);
+                servers.insert(server.id.clone(), server);
             }
             Err(e) => {
                 error!("Error adding server: {:?}", e);

@@ -223,9 +223,9 @@ impl ProxyForward {
     /// ## Example
     /// 
     /// ```rust
-    /// let match_path = "/api/users" // Forwarder Matching Path
-    /// let request_path = "/api/users/fetch/by/id" // URI that user see
-    /// let path_that_server_will_receive = "/fetch/by/id" // URI that server see
+    /// let match_path = "/api/users"; // Forwarder Matching Path
+    /// let request_path = "/api/users/fetch/by/id"; // URI that user see
+    /// let path_that_server_will_receive = "/fetch/by/id"; // URI that server see
     /// ```
     pub fn set_rewrite_skip_the_match_path(&mut self) -> &mut Self {
         self.rewrite_path = Some(ProxyForwardPathRewrite::SkipTheMatchPath);
@@ -240,7 +240,7 @@ impl ProxyForward {
     /// ## Example
     /// 
     /// ```rust
-    /// let middleware = |proxy_state, forwarder, selected_server, mut req| {
+    /// let middleware = |proxy_state, forwarder, selected_server, mut req: http::Request<Vec<u8>>| {
     ///    // Do something with the request
     ///    req.body_mut().push(b'1');
     ///    req

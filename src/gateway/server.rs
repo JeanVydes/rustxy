@@ -1,6 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use http::{uri::Scheme, Method, Uri};
+use native_tls::TlsAcceptor;
 use uuid::Uuid;
 
 
@@ -13,15 +14,16 @@ use uuid::Uuid;
 /// * `address` - The address
 /// * `accepted_schemes` - The accepted schemes
 /// * `endpoints` - The endpoints
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Server {
     pub id: Uuid,
     pub address: SocketAddr,
-    pub accepted_schemes: Vec<Scheme>,
     pub endpoints: HashMap<Uri, ServerEndpoint>,
     pub active_connections: usize,
     pub weight: usize,
     pub max_connections: usize,
+    pub tls_identity: Option<native_tls::Identity>,
+    pub tls_acceptor: Option<native_tls::TlsAcceptor>,
 }
 
 /// # Server Config
@@ -33,7 +35,7 @@ pub struct Server {
 /// * `address` - The address
 /// * `accepted_schemes` - The accepted schemes
 /// * `endpoints` - The endpoints
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     pub id: Uuid,
     pub address: SocketAddr,
@@ -41,6 +43,7 @@ pub struct ServerConfig {
     pub endpoints: HashMap<Uri, ServerEndpoint>,
     pub weight: usize,
     pub max_connections: usize,
+    pub tls_identity: Option<native_tls::Identity>,
 }
 
 /// # Server
@@ -55,14 +58,25 @@ pub struct ServerConfig {
 /// * `remove_endpoint` - Remove an endpoint
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
+        let tls_acceptor;
+        match config.tls_identity.clone() {
+            Some(identity) => {
+                tls_acceptor = Some(TlsAcceptor::new(identity).unwrap());
+            },
+            None => {
+                tls_acceptor = None;
+            }
+        }
+
         Self {
             id: config.id,
             address: config.address,
-            accepted_schemes: config.accepted_schemes,
             endpoints: config.endpoints,
             active_connections: 0,
             weight: config.weight,
             max_connections: config.max_connections,
+            tls_identity: config.tls_identity,
+            tls_acceptor,
         }
     }
 
